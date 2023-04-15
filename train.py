@@ -77,6 +77,9 @@ def parse_int_list(s):
 @click.option('--resume',        help='Resume from previous training state', metavar='PT',          type=str)
 @click.option('-n', '--dry-run', help='Print training options and exit',                            is_flag=True)
 
+# Inverse problem related.
+@click.option('--inv-problem',   help='Type of inverse problem to solve.', metavar='STR',           type=str, default=None)
+
 def main(**kwargs):
     """Train diffusion-based generative model using the techniques described in the
     paper "Elucidating the Design Space of Diffusion-Based Generative Models".
@@ -99,6 +102,7 @@ def main(**kwargs):
     c.network_kwargs = dnnlib.EasyDict()
     c.loss_kwargs = dnnlib.EasyDict()
     c.optimizer_kwargs = dnnlib.EasyDict(class_name='torch.optim.Adam', lr=opts.lr, betas=[0.9,0.999], eps=1e-8)
+    c.inv_problem = dnnlib.EasyDict(inv_problem=opts.inv_problem)
 
     # Validate dataset options.
     try:
@@ -210,6 +214,8 @@ def main(**kwargs):
     dist.print0(f'Number of GPUs:          {dist.get_world_size()}')
     dist.print0(f'Batch size:              {c.batch_size}')
     dist.print0(f'Mixed-precision:         {c.network_kwargs.use_fp16}')
+    if c.inv_problem is not None:
+        dist.print0(f'Inverse Problem:         {c.inv_problem}')
     dist.print0()
 
     # Dry run?

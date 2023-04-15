@@ -29,6 +29,7 @@ def training_loop(
     network_kwargs      = {},       # Options for model and preconditioning.
     loss_kwargs         = {},       # Options for loss function.
     optimizer_kwargs    = {},       # Options for optimizer.
+    inv_problem         = None,     # What type of inverse problem to consider.
     augment_kwargs      = None,     # Options for augmentation pipeline, None = disable.
     seed                = 0,        # Global random seed.
     batch_size          = 512,      # Total batch size for one training iteration.
@@ -71,7 +72,11 @@ def training_loop(
 
     # Construct network.
     dist.print0('Constructing network...')
-    interface_kwargs = dict(img_resolution=dataset_obj.resolution, img_channels=dataset_obj.num_channels, label_dim=dataset_obj.label_dim)
+    if inv_problem is None:
+        input_channels = dataset_obj.num_channels
+    else:
+        input_channels = 2 * dataset_obj.num_channels
+    interface_kwargs = dict(img_resolution=dataset_obj.resolution, img_channels=input_channels, label_dim=dataset_obj.label_dim)
     net = dnnlib.util.construct_class_by_name(**network_kwargs, **interface_kwargs) # subclass of torch.nn.Module
     net.train().requires_grad_(True).to(device)
     if dist.get_rank() == 0:
@@ -127,6 +132,21 @@ def training_loop(
                 images, labels = next(dataset_iterator)
                 images = images.to(device).to(torch.float32) / 127.5 - 1
                 labels = labels.to(device)
+                if inv_problem is not None:
+                    if inv_problem == "inpainting":
+                        threshold = 0.4 * torch.rand().to(device) + 0.1  #Between 10-50% pixels dropped
+                        mask = (torch.rand_like(images[:, [0], ...]) > threshold)
+                        measurements = images * mask
+                        images = torch.cat([images, measurements], dim=1)
+                    elif inv_problem == "denoising":
+                        sigma = 0.25 * torch.rand().to(device) + 0.05
+                        noise = sigma * torch.randn_like(images)
+                        measurements = images + noise
+                        images = torch.cat([images, measurements], dim=1)
+                    else:
+                        raise ValueError("Inverse problem type not supported."
+                                         "Current choices are inpainting, denoising.")
+
                 loss = loss_fn(net=ddp, images=images, labels=labels, augment_pipe=augment_pipe)
                 training_stats.report('Loss/loss', loss)
                 loss.sum().mul(loss_scaling / batch_gpu_total).backward()

@@ -79,6 +79,7 @@ def parse_int_list(s):
 
 # Inverse problem related.
 @click.option('--inv-problem',   help='Type of inverse problem to solve.', metavar='STR',           type=str, default=None)
+@click.option('--peft',          help='Parameter efficient finetuning.', metavar='BOOL',            is_flag=True)
 
 def main(**kwargs):
     """Train diffusion-based generative model using the techniques described in the
@@ -103,6 +104,7 @@ def main(**kwargs):
     c.loss_kwargs = dnnlib.EasyDict()
     c.optimizer_kwargs = dnnlib.EasyDict(class_name='torch.optim.Adam', lr=opts.lr, betas=[0.9,0.999], eps=1e-8)
     c.inv_problem = dnnlib.EasyDict(inv_problem=opts.inv_problem)
+    c.peft = dnnlib.EasyDict(peft=opts.peft)
 
     # Validate dataset options.
     try:

@@ -30,6 +30,7 @@ def training_loop(
     loss_kwargs         = {},       # Options for loss function.
     optimizer_kwargs    = {},       # Options for optimizer.
     inv_problem         = None,     # What type of inverse problem to consider.
+    peft                = False,
     augment_kwargs      = None,     # Options for augmentation pipeline, None = disable.
     seed                = 0,        # Global random seed.
     batch_size          = 512,      # Total batch size for one training iteration.
@@ -76,7 +77,7 @@ def training_loop(
         input_channels = dataset_obj.num_channels
     else:
         input_channels = 2 * dataset_obj.num_channels
-    interface_kwargs = dict(img_resolution=dataset_obj.resolution, img_channels=input_channels, label_dim=dataset_obj.label_dim)
+    interface_kwargs = dict(img_resolution=dataset_obj.resolution, img_channels=input_channels, out_channels=dataset_obj.num_channels, label_dim=dataset_obj.label_dim)
     net = dnnlib.util.construct_class_by_name(**network_kwargs, **interface_kwargs) # subclass of torch.nn.Module
     net.train().requires_grad_(True).to(device)
     if dist.get_rank() == 0:

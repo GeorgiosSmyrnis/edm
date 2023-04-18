@@ -17,12 +17,23 @@ def init():
     if 'MASTER_PORT' not in os.environ:
         os.environ['MASTER_PORT'] = '29500'
     if 'RANK' not in os.environ:
-        os.environ['RANK'] = '0'
+        if 'SLURM_PROCID' in os.environ:
+            os.environ['RANK'] = os.environ['SLURM_PROCID']
+        else:
+            os.environ['RANK'] = '0'
     if 'LOCAL_RANK' not in os.environ:
-        os.environ['LOCAL_RANK'] = '0'
+        if 'SLURM_PROCID' in os.environ and 'SLURM_NTASKS_PER_NODE' in os.environ:
+            os.environ['LOCAL_RANK'] = str(int(os.environ['SLURM_PROCID']) % int(os.environ['SLURM_NTASKS_PER_NODE']))
+        else:
+            os.environ['LOCAL_RANK'] = '0'
     if 'WORLD_SIZE' not in os.environ:
-        os.environ['WORLD_SIZE'] = '1'
-
+        if 'SLURM_NTASKS' in os.environ:
+            os.environ['WORLD_SIZE'] = os.environ['SLURM_NTASKS']
+        else:
+            os.environ['WORLD_SIZE'] = '1'
+    
+    print(os.environ['RANK'])
+    print(os.environ['LOCAL_RANK'])
     backend = 'gloo' if os.name == 'nt' else 'nccl'
     torch.distributed.init_process_group(backend=backend, init_method='env://')
     torch.cuda.set_device(int(os.environ.get('LOCAL_RANK', '0')))

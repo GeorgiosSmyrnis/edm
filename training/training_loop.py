@@ -145,7 +145,7 @@ def training_loop(
                         measurements = images + noise
                         images = torch.cat([images, measurements], dim=1)
                     else:
-                        raise ValueError("Inverse problem type not supported."
+                        raise ValueError(f"Inverse problem type not supported: {inv_problem} "
                                          "Current choices are inpainting, denoising.")
 
                 loss = loss_fn(net=ddp, images=images, labels=labels, augment_pipe=augment_pipe)

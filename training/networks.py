@@ -595,7 +595,7 @@ class iDDPMPrecond(torch.nn.Module):
         self.C_1 = C_1
         self.C_2 = C_2
         self.M = M
-        self.model = globals()[model_type](img_resolution=img_resolution, in_channels=img_channels, out_channels=self.out_channels*2, label_dim=label_dim, **model_kwargs)
+        self.model = globals()[model_type](img_resolution=img_resolution, in_channels=img_channels, out_channels=self.out_channels, label_dim=label_dim, **model_kwargs)
 
         u = torch.zeros(M + 1)
         for j in range(M, 0, -1): # M, ..., 1
@@ -679,3 +679,54 @@ class EDMPrecond(torch.nn.Module):
         return torch.as_tensor(sigma)
 
 #----------------------------------------------------------------------------
+
+@persistence.persistent_class
+class PEFTEDM(torch.nn.Module):
+    def __init__(self,
+        img_resolution,                     # Image resolution.
+        img_channels,                       # Number of color channels.
+        from_pretrained = True,
+        pretrained_net  = None,
+        out_channels    = None,             # Number of output channels.
+        label_dim       = 0,                # Number of class labels, 0 = unconditional.
+        use_fp16        = False,            # Execute the underlying model at FP16 precision?
+        sigma_min       = 0,                # Minimum supported noise level.
+        sigma_max       = float('inf'),     # Maximum supported noise level.
+        sigma_data      = 0.5,              # Expected standard deviation of the training data.
+        model_type      = 'DhariwalUNet',   # Class name of the underlying model.
+        **model_kwargs,                     # Keyword arguments for the underlying model.
+    ):
+        super().__init__()
+        init = dict(init_mode='xavier_uniform')
+        self.adapt_enc = Conv2d(in_channels=img_channels*2, 
+                                 out_channels=img_channels, 
+                                 kernel=3,
+                                 **init
+                                )
+        self.adapt_dec = Conv2d(in_channels=img_channels, 
+                            out_channels=img_channels*2, 
+                            kernel=3,
+                            **init
+                        )
+
+        if from_pretrained and pretrained_net is not None:
+            self.backbone = pretrained_net
+        else:
+            self.backbone = EDMPrecond(
+                img_resolution, 
+                img_channels,   
+                out_channels,    
+                label_dim,       
+                use_fp16,       
+                sigma_min,       
+                sigma_max,       
+                sigma_data,      
+                model_type,      
+                **model_kwargs, 
+            )
+
+    def forward(self, x, sigma, class_labels=None, force_fp32=False, **model_kwargs):
+        x = self.adapt_enc(x)
+        outputs = self.backbone(x, sigma, class_labels, force_fp32, **model_kwargs)
+        outputs_dec = self.adapt_dec(outputs)
+        return outputs_dec

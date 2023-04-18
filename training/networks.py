@@ -657,7 +657,7 @@ class EDMPrecond(torch.nn.Module):
         self.sigma_min = sigma_min
         self.sigma_max = sigma_max
         self.sigma_data = sigma_data
-        self.model = globals()[model_type](img_resolution=img_resolution, in_channels=img_channels, out_channels=self.out_channels*2, label_dim=label_dim, **model_kwargs)
+        self.model = globals()[model_type](img_resolution=img_resolution, in_channels=img_channels, out_channels=self.out_channels, label_dim=label_dim, **model_kwargs)
 
     def forward(self, x, sigma, class_labels=None, force_fp32=False, **model_kwargs):
         x = x.to(torch.float32)
@@ -672,7 +672,7 @@ class EDMPrecond(torch.nn.Module):
 
         F_x = self.model((c_in * x).to(dtype), c_noise.flatten(), class_labels=class_labels, **model_kwargs)
         assert F_x.dtype == dtype
-        D_x = c_skip * x + c_out * F_x.to(torch.float32)
+        D_x = c_skip * x[:, :3, ...] + c_out * F_x.to(torch.float32)
         return D_x
 
     def round_sigma(self, sigma):
@@ -728,5 +728,4 @@ class PEFTEDM(torch.nn.Module):
     def forward(self, x, sigma, class_labels=None, force_fp32=False, **model_kwargs):
         x = self.adapt_enc(x)
         outputs = self.backbone(x, sigma, class_labels, force_fp32, **model_kwargs)
-        outputs_dec = self.adapt_dec(outputs)
-        return outputs_dec
+        return outputs

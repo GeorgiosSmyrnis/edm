@@ -80,6 +80,7 @@ def parse_int_list(s):
 # Inverse problem related.
 @click.option('--inv-problem',   help='Type of inverse problem to solve.', metavar='STR',           type=str, default=None)
 @click.option('--peft',          help='Parameter efficient finetuning.', metavar='BOOL',            is_flag=True)
+@click.option('--pretrained',    help='Pretrained network state', metavar='PATH|URL',               type=str)
 
 def main(**kwargs):
     """Train diffusion-based generative model using the techniques described in the
@@ -180,6 +181,8 @@ def main(**kwargs):
         c.resume_pkl = os.path.join(os.path.dirname(opts.resume), f'network-snapshot-{match.group(1)}.pkl')
         c.resume_kimg = int(match.group(1))
         c.resume_state_dump = opts.resume
+    elif opts.peft:
+        c.pretrained_pkl = opts.pretrained
 
     # Description string.
     cond_str = 'cond' if c.dataset_kwargs.use_labels else 'uncond'
@@ -217,7 +220,9 @@ def main(**kwargs):
     dist.print0(f'Batch size:              {c.batch_size}')
     dist.print0(f'Mixed-precision:         {c.network_kwargs.use_fp16}')
     if c.inv_problem is not None:
-        dist.print0(f'Inverse Problem:         {c.inv_problem}')
+        dist.print0(f'Inverse Problem:     {c.inv_problem}')
+    if c.peft:
+        dist.print0(f'PEFT:                {c.peft}')
     dist.print0()
 
     # Dry run?

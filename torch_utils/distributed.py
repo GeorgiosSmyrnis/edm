@@ -32,8 +32,6 @@ def init():
         else:
             os.environ['WORLD_SIZE'] = '1'
     
-    print(os.environ['RANK'])
-    print(os.environ['LOCAL_RANK'])
     backend = 'gloo' if os.name == 'nt' else 'nccl'
     torch.distributed.init_process_group(backend=backend, init_method='env://')
     torch.cuda.set_device(int(os.environ.get('LOCAL_RANK', '0')))

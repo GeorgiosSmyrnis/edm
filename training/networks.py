@@ -595,7 +595,7 @@ class iDDPMPrecond(torch.nn.Module):
         self.C_1 = C_1
         self.C_2 = C_2
         self.M = M
-        self.model = globals()[model_type](img_resolution=img_resolution, in_channels=img_channels, out_channels=self.out_channels, label_dim=label_dim, **model_kwargs)
+        self.model = globals()[model_type](img_resolution=img_resolution, in_channels=img_channels, out_channels=self.out_channels*2, label_dim=label_dim, **model_kwargs)
 
         u = torch.zeros(M + 1)
         for j in range(M, 0, -1): # M, ..., 1
@@ -657,7 +657,7 @@ class EDMPrecond(torch.nn.Module):
         self.sigma_min = sigma_min
         self.sigma_max = sigma_max
         self.sigma_data = sigma_data
-        self.model = globals()[model_type](img_resolution=img_resolution, in_channels=img_channels, out_channels=self.out_channels, label_dim=label_dim, **model_kwargs)
+        self.model = globals()[model_type](img_resolution=img_resolution, in_channels=img_channels, out_channels=self.out_channels*2, label_dim=label_dim, **model_kwargs)
 
     def forward(self, x, sigma, class_labels=None, force_fp32=False, **model_kwargs):
         x = x.to(torch.float32)

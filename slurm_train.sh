@@ -2,11 +2,11 @@
 
 #SBATCH -J edm_train
 #SBATCH -o %x_%j.out
-#SBATCH -p rtx-dev
+#SBATCH -p gpu-a100
 #SBATCH -N 2
-#SBATCH --tasks-per-node=4
-#SBATCH --cpus-per-task=4
-#SBATCH -t 2:00:00
+#SBATCH --tasks-per-node=3
+#SBATCH --cpus-per-task=43
+#SBATCH -t 48:00:00
 #SBATCH -A MLL
 
 source /work2/08002/gsmyrnis/frontera/conda/miniconda3/bin/activate edm
@@ -23,5 +23,4 @@ cd /work2/08002/gsmyrnis/ls6/neurips2023/diffusion/edm
 mkdir -p $OUTDIR
 
 srun python train.py --outdir=$OUTDIR \
-    --data=$DATADIR --cond=1 --arch=ddpmpp --inv-problem=$INV_PROBLEM \
-    --batch 16
+    --data=$DATADIR --cond=1 --arch=ddpmpp --inv-problem=$INV_PROBLEM

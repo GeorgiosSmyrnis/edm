@@ -20,6 +20,7 @@ import dnnlib
 from torch_utils import distributed as dist
 
 from torch.utils.data import DataLoader
+from torch_utils.misc import AverageMeter
 from torchvision.datasets import CIFAR10
 from torchvision.transforms import Compose, Normalize, ToTensor
 
@@ -286,8 +287,10 @@ def main(network_pkl, data_dir, outdir, max_batch_size, device=torch.device('cud
         torch.distributed.barrier()
 
     # Loop over batches.
-    dist.print0(f'Generating {len(seeds)} images to "{outdir}"...')
+    dist.print0(f'Generating {len(dataset)} images to "{outdir}"...')
 
+    criterion = torch.nn.L1Loss()
+    avg = AverageMeter()
 
     for i, (images, _) in enumerate(dataloader):
 
@@ -318,7 +321,11 @@ def main(network_pkl, data_dir, outdir, max_batch_size, device=torch.device('cud
         sampler_kwargs = {key: value for key, value in sampler_kwargs.items() if value is not None}
         have_ablation_kwargs = any(x in sampler_kwargs for x in ['solver', 'discretization', 'schedule', 'scaling'])
         sampler_fn = ablation_sampler if have_ablation_kwargs else edm_sampler
-        images = sampler_fn(net, latents, class_labels, randn_like=rnd.randn_like, **sampler_kwargs)
+        recon_images = sampler_fn(net, latents, class_labels, randn_like=rnd.randn_like, **sampler_kwargs)
+
+        with torch.no_grad():
+            loss = criterion(images, recon_images)
+            avg.update(loss, n=images.shape[0])
 
         # Save images.
         images_np = (images * 127.5 + 128).clip(0, 255).to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
@@ -333,6 +340,7 @@ def main(network_pkl, data_dir, outdir, max_batch_size, device=torch.device('cud
 
     # Done.
     dist.print0('Done.')
+    dist.print0(f'Average MAE: {avg.get():.4f}')
 
 #----------------------------------------------------------------------------
 

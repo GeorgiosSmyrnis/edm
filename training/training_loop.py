@@ -121,13 +121,13 @@ def training_loop(
         with dnnlib.util.open_url(pretrained_pkl, verbose=(dist.get_rank() == 0)) as f:
             data = pickle.load(f)
             misc.copy_params_and_buffers(src_module=data['ema'], dst_module=net, require_all=True)
-            net.train().requires_grad_(True).to(device)
             wrapper.backbone = net
-            ddp = torch.nn.parallel.DistributedDataParallel(wrapper, device_ids=[device], broadcast_buffers=False)
             ema = copy.deepcopy(wrapper).train().requires_grad_(False)
             net = copy.deepcopy(wrapper).train().requires_grad_(False)
             for name, param in net.named_parameters():
                 if "adapt" in name: param.requires_grad_(True)
+            optimizer = dnnlib.util.construct_class_by_name(params=net.parameters(), **optimizer_kwargs) # subclass of torch.optim.Optimizer
+            ddp = torch.nn.parallel.DistributedDataParallel(net, device_ids=[device], broadcast_buffers=False)
 
         del data # conserve memory
 
@@ -164,7 +164,6 @@ def training_loop(
                     else:
                         raise ValueError(f"Inverse problem type not supported: {inv_problem} "
                                          "Current choices are inpainting, denoising.")
-
                 loss = loss_fn(net=ddp, images=images, labels=labels, augment_pipe=augment_pipe)
                 training_stats.report('Loss/loss', loss)
                 loss.sum().mul(loss_scaling / batch_gpu_total).backward()

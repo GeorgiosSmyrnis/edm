@@ -703,11 +703,6 @@ class PEFTEDM(torch.nn.Module):
                                  kernel=3,
                                  **init
                                 )
-        self.adapt_dec = Conv2d(in_channels=img_channels, 
-                            out_channels=img_channels*2, 
-                            kernel=3,
-                            **init
-                        )
 
         if from_pretrained and pretrained_net is not None:
             self.backbone = pretrained_net

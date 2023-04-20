@@ -4,8 +4,8 @@
 #SBATCH -o %x_%j.out
 #SBATCH -p gpu-a100
 #SBATCH -N 2
-#SBATCH -n 3
-#SBATCH --cpus-per-task=43
+#SBATCH --tasks-per-node 3
+#SBATCH --cpus-per-task 42
 #SBATCH -t 48:00:00
 #SBATCH -A MLL
 
@@ -23,5 +23,5 @@ cd "/home1/08134/negin/edm/"
 mkdir -p $OUTDIR
 
 srun python3 train.py --outdir=$OUTDIR  --data=$DATADIR \
-    --cond=1 --arch=ddpmpp --inv-problem=$INV_PROBLEM --batch 128 \
+    --cond=1 --arch=ddpmpp --inv-problem=$INV_PROBLEM --batch 126 \
     --peft --pretrained="https://nvlabs-fi-cdn.nvidia.com/edm/pretrained/edm-cifar10-32x32-cond-vp.pkl"

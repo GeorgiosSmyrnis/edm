@@ -2,26 +2,26 @@
 
 #SBATCH -J edm_train
 #SBATCH -o %x_%j.out
-#SBATCH -p rtx-dev
+#SBATCH -p gpu-a100
 #SBATCH -N 2
-#SBATCH --tasks-per-node=4
-#SBATCH --cpus-per-task=4
-#SBATCH -t 2:00:00
+#SBATCH --tasks-per-node 3
+#SBATCH --cpus-per-task 42
+#SBATCH -t 48:00:00
 #SBATCH -A MLL
 
-source /work2/08002/gsmyrnis/frontera/conda/miniconda3/bin/activate edm
+source "/home1/08134/negin/.bashrc"
+source activate edm
 
 export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
-export MASTER_PORT=8080
+export MASTER_PORT=12802
 
-DATADIR=$1
-OUTDIR=$2
-INV_PROBLEM=$3
+DATADIR='/home1/08134/negin/edm/datasets/cifar10-32x32.zip'
+OUTDIR='/home1/08134/negin/edm/output'
+INV_PROBLEM='inpainting'
 
-cd /work2/08002/gsmyrnis/ls6/neurips2023/diffusion/edm
-
+cd "/home1/08134/negin/edm/"
 mkdir -p $OUTDIR
 
-srun python train.py --outdir=$OUTDIR \
+srun python3 train.py --outdir=$OUTDIR \
     --data=$DATADIR --cond=1 --arch=ddpmpp --inv-problem=$INV_PROBLEM \
-    --batch 16
+    --batch 126

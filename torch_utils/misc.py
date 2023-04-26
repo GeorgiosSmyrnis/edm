@@ -11,6 +11,7 @@ import numpy as np
 import torch
 import warnings
 import dnnlib
+from PIL import Image
 
 #----------------------------------------------------------------------------
 # Cached construction of constant tensors. Avoids CPU=>GPU copy when the
@@ -286,3 +287,19 @@ class AverageMeter(object):
         return self.avg
 
 #----------------------------------------------------------------------------
+
+def edm_schedule(sigma_min, sigma_max, rho=7, num_steps=20, device='cuda'):
+    step_indices = torch.arange(num_steps, dtype=torch.float64, device=device)
+    t_steps = (sigma_max ** (1 / rho) + step_indices / (num_steps - 1) * (sigma_min ** (1 / rho) - sigma_max ** (1 / rho))) ** rho
+    return t_steps
+
+
+def save_image(x, dest_path, channels=3, gridw=8, resolution=32):
+    # Save image grid.
+    print(f'Saving image grid to "{dest_path}"...')
+    image = (x * 127.5 + 128).clip(0, 255).to(torch.uint8)
+    image = image.reshape(-1, gridw, *image.shape[1:]).permute(0, 3, 1, 4, 2)
+    image = image.reshape(-1, gridw * resolution, channels)
+    image = image.cpu().numpy()
+    Image.fromarray(image, 'RGB').save(dest_path)
+    print('Done.')

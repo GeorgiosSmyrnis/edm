@@ -28,9 +28,9 @@ from torchvision.transforms import Compose, Normalize, ToTensor
 # Proposed EDM sampler (Algorithm 2).
 
 def edm_sampler(
-    net, latents, class_labels=None, randn_like=torch.randn_like,
+    net, inputs, class_labels=None, randn_like=torch.randn_like,
     num_steps=18, sigma_min=0.002, sigma_max=80, rho=7,
-    S_churn=0, S_min=0, S_max=float('inf'), S_noise=1,
+    S_churn=0, S_min=0, S_max=float('inf'), S_noise=1, self_cond=False
 ):
     # Adjust noise levels based on what's supported by the network.
     sigma_min = max(sigma_min, net.sigma_min)
@@ -41,8 +41,11 @@ def edm_sampler(
     t_steps = (sigma_max ** (1 / rho) + step_indices / (num_steps - 1) * (sigma_min ** (1 / rho) - sigma_max ** (1 / rho))) ** rho
     t_steps = torch.cat([net.round_sigma(t_steps), torch.zeros_like(t_steps[:1])]) # t_N = 0
 
+    latents = inputs[:, :3, ...].to(torch.float64) * t_steps[0]
+    measurements = inputs[:, :3, ...].to(torch.float64)
+
     # Main sampling loop.
-    x_next = latents.to(torch.float64) * t_steps[0]
+    x_next = latents
     for i, (t_cur, t_next) in enumerate(zip(t_steps[:-1], t_steps[1:])): # 0, ..., N-1
         x_cur = x_next
 
@@ -51,16 +54,28 @@ def edm_sampler(
         t_hat = net.round_sigma(t_cur + gamma * t_cur)
         x_hat = x_cur + (t_hat ** 2 - t_cur ** 2).sqrt() * S_noise * randn_like(x_cur)
 
-        # Euler step.
-        denoised = net(x_hat, t_hat, class_labels).to(torch.float64)
-        d_cur = (x_hat - denoised) / t_hat
-        x_next = x_hat + (t_next - t_hat) * d_cur
+        if self_cond:
+            denoised_from_measurements = net(torch.cat([x_hat, measurements], dim=1), t_hat, class_labels).to(torch.float64)
+            denoised = net(torch.cat([x_hat, denoised_from_measurements], dim=1), t_hat, class_labels).to(torch.float64)
+            d_cur = (x_hat - denoised) / t_hat
+            x_next = x_hat + (t_next - t_hat) * d_cur
 
-        # Apply 2nd order correction.
-        if i < num_steps - 1:
-            denoised = net(x_next, t_next, class_labels).to(torch.float64)
-            d_prime = (x_next - denoised) / t_next
-            x_next = x_hat + (t_next - t_hat) * (0.5 * d_cur + 0.5 * d_prime)
+            if i < num_steps - 1:
+                denoised_from_measurements = net(torch.cat([x_next, measurements], dim=1), t_hat, class_labels).to(torch.float64)
+                denoised = net(torch.cat([x_next, denoised_from_measurements], dim=1), t_next, class_labels).to(torch.float64)
+                d_prime = (x_next - denoised) / t_next
+                x_next = x_hat + (t_next - t_hat) * (0.5 * d_cur + 0.5 * d_prime)
+        else:
+            # Euler step.
+            denoised = net(torch.cat([x_hat, measurements], dim=1), t_hat, class_labels).to(torch.float64)
+            d_cur = (x_hat - denoised) / t_hat
+            x_next = x_hat + (t_next - t_hat) * d_cur
+
+            # Apply 2nd order correction.
+            if i < num_steps - 1:
+                denoised = net(torch.cat([x_next, measurements], dim=1), t_next, class_labels).to(torch.float64)
+                d_prime = (x_next - denoised) / t_next
+                x_next = x_hat + (t_next - t_hat) * (0.5 * d_cur + 0.5 * d_prime)
 
     return x_next
 
@@ -270,7 +285,7 @@ def main(network_pkl, data_dir, outdir, max_batch_size, device=torch.device('cud
         raise ValueError("Dataset not supported.")
 
     num_batches = ((len(dataset) - 1) // (max_batch_size * dist.get_world_size()) + 1) * dist.get_world_size()
-    all_batches = torch.as_tensor(dataset).tensor_split(num_batches)
+    all_batches = torch.range(0, len(dataset)).tensor_split(num_batches)
     rank_batches = all_batches[dist.get_rank() :: dist.get_world_size()]
 
     # Rank 0 goes first.
@@ -300,7 +315,7 @@ def main(network_pkl, data_dir, outdir, max_batch_size, device=torch.device('cud
         mask = (torch.rand_like(images[:, [0], ...]) > threshold)
         measurements = images * mask
 
-        batch_seeds = rank_batches[i]
+        batch_seeds = torch.randint(0, 100000, (images.shape[0],))
 
         batch_size = len(batch_seeds)
         if batch_size == 0:
@@ -313,9 +328,6 @@ def main(network_pkl, data_dir, outdir, max_batch_size, device=torch.device('cud
         class_labels = None
         if net.label_dim:
             class_labels = torch.eye(net.label_dim, device=device)[rnd.randint(net.label_dim, size=[batch_size], device=device)]
-        # if class_idx is not None:
-        #     class_labels[:, :] = 0
-        #     class_labels[:, class_idx] = 1
 
         # Generate images.
         sampler_kwargs = {key: value for key, value in sampler_kwargs.items() if value is not None}

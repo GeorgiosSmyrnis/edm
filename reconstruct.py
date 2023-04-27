@@ -35,13 +35,21 @@ def edm_sampler(
     S_churn=0, S_min=0, S_max=float('inf'), S_noise=1, self_cond=False
 ):
     # Adjust noise levels based on what's supported by the network.
-    sigma_min = max(sigma_min, net.sigma_min)
-    sigma_max = min(sigma_max, net.sigma_max)
+    if hasattr(net, "backbone"):
+        sigma_min = max(sigma_min, net.backbone.sigma_min)
+        sigma_max = min(sigma_max, net.backbone.sigma_max)
+    else:
+        sigma_min = max(sigma_min, net.sigma_min)
+        sigma_max = min(sigma_max, net.sigma_max)
 
     # Time step discretization.
     step_indices = torch.arange(num_steps, dtype=torch.float64, device=inputs.device)
     t_steps = (sigma_max ** (1 / rho) + step_indices / (num_steps - 1) * (sigma_min ** (1 / rho) - sigma_max ** (1 / rho))) ** rho
-    t_steps = torch.cat([net.round_sigma(t_steps), torch.zeros_like(t_steps[:1])]) # t_N = 0
+
+    if hasattr(net, "backbone"):
+        t_steps = torch.cat([net.backbone.round_sigma(t_steps), torch.zeros_like(t_steps[:1])]) # t_N = 0
+    else:
+        t_steps = torch.cat([net.round_sigma(t_steps), torch.zeros_like(t_steps[:1])]) # t_N = 0
 
     latents = inputs[:, :3, ...].to(torch.float64) * t_steps[0]
     measurements = inputs[:, :3, ...].to(torch.float64)
@@ -53,7 +61,10 @@ def edm_sampler(
 
         # Increase noise temporarily.
         gamma = min(S_churn / num_steps, np.sqrt(2) - 1) if S_min <= t_cur <= S_max else 0
-        t_hat = net.round_sigma(t_cur + gamma * t_cur)
+        if hasattr(net, "backbone"):
+            t_hat = net.backbone.round_sigma(t_cur + gamma * t_cur)
+        else:
+            t_hat = net.round_sigma(t_cur + gamma * t_cur)
         x_hat = x_cur + (t_hat ** 2 - t_cur ** 2).sqrt() * S_noise * randn_like(x_cur)
 
         if self_cond:
@@ -315,11 +326,13 @@ def main(network_pkl, dataset, data_dir, outdir, subdirs, max_batch_size, device
 
         # Pick latents and labels.
         rnd = StackedRandomGenerator(device, batch_seeds)
-        latents = rnd.randn([batch_size, net.img_channels, net.img_resolution, net.img_resolution], device=device)
+        latents = rnd.randn_like(images)
         latents = torch.cat([latents, measurements], dim=1)
         class_labels = None
-        if net.label_dim:
+        if (hasattr(net, "label_dim") and net.label_dim):
             class_labels = torch.eye(net.label_dim, device=device)[rnd.randint(net.label_dim, size=[batch_size], device=device)]
+        elif (hasattr(net.backbone, "label_dim") and net.backbone.label_dim):
+            class_labels = torch.eye(net.backbone.label_dim, device=device)[rnd.randint(net.backbone.label_dim, size=[batch_size], device=device)]
 
         # Generate images.
         sampler_kwargs = {key: value for key, value in sampler_kwargs.items() if value is not None}

@@ -30,7 +30,7 @@ from torchvision.transforms import Compose, Normalize, ToTensor
 # Proposed EDM sampler (Algorithm 2).
 
 def edm_sampler(
-    net, inputs, projection_to_measurements, class_labels=None,
+    net, inputs, projection_to_measurements, mask, class_labels=None,
     randn_like=torch.randn_like, num_steps=18, sigma_min=0.002, sigma_max=80, rho=7,
     S_churn=0, S_min=0, S_max=float('inf'), S_noise=1, self_cond=False
 ):
@@ -52,7 +52,7 @@ def edm_sampler(
         t_steps = torch.cat([net.round_sigma(t_steps), torch.zeros_like(t_steps[:1])]) # t_N = 0
 
     latents = inputs[:, :3, ...].to(torch.float64) * t_steps[0]
-    measurements = inputs[:, :3, ...].to(torch.float64)
+    measurements = inputs[:, 3:, ...].to(torch.float64)
 
     # Main sampling loop.
     x_next = latents
@@ -68,16 +68,38 @@ def edm_sampler(
         x_hat = x_cur + (t_hat ** 2 - t_cur ** 2).sqrt() * S_noise * randn_like(x_cur)
 
         if self_cond:
-            projected_measurements = projection_to_measurements(x_hat, measurements)
-            denoised = net(torch.cat([x_hat, projected_measurements], dim=1), t_hat, class_labels).to(torch.float64)[:, :3, ...]
+            
+            # DDRM
+            with torch.no_grad():
+                denoised_one_step = net(torch.cat([x_hat, torch.zeros_like(x_hat)], dim=1), t_hat, class_labels)[:, :3, ...].to(torch.float64)
+            projected_measurements = projection_to_measurements(denoised_one_step, measurements)   
+            denoised = net(torch.cat([x_hat, projected_measurements], dim=1), t_hat, class_labels).to(torch.float64)[:, :3, ...] 
             d_cur = (x_hat - denoised) / t_hat
             x_next = x_hat + (t_next - t_hat) * d_cur
-
+            y_noisy = measurements + (t_next - t_hat) * d_cur
+            x_next = torch.logical_not(mask) * x_next + mask * y_noisy        
             # if i < num_steps - 1:
-            #     denoised_from_measurements = net(torch.cat([x_next, measurements], dim=1), t_hat, class_labels).to(torch.float64)
-            #     denoised = net(torch.cat([x_next, denoised_from_measurements], dim=1), t_next, class_labels).to(torch.float64)
-            #     d_prime = (x_next - denoised) / t_next
-            #     x_next = x_hat + (t_next - t_hat) * (0.5 * d_cur + 0.5 * d_prime)
+            #     denoised = projection_to_measurements(denoised, measurements)
+            # denoised = torch.clamp(denoised, -1.0, 1.0)
+
+
+
+
+            # with torch.no_grad():
+            #     denoised_one_step = net(torch.cat([x_hat, torch.zeros_like(x_hat)], dim=1), t_hat, class_labels)[:, :3, ...].to(torch.float64)
+            # projected_measurements = projection_to_measurements(denoised_one_step, measurements)
+            # denoised = net(torch.cat([x_hat, projected_measurements], dim=1), t_hat, class_labels).to(torch.float64)[:, :3, ...]
+            # if i < num_steps - 1:
+            #     denoised = projection_to_measurements(denoised, measurements)
+            # denoised = torch.clamp(denoised, -1.0, 1.0)
+            # d_cur = (x_hat - denoised) / t_hat
+            # x_next = x_hat + (t_next - t_hat) * d_cur
+
+            # # if i < num_steps - 1:
+            # #     projected_measurements = projection_to_measurements(x_next, measurements)
+            # #     denoised = net(torch.cat([x_next, projected_measurements], dim=1), t_next, class_labels).to(torch.float64)[:, :3, ...]
+            # #     d_prime = (x_next - denoised) / t_next
+            # #     x_next = x_hat + (t_next - t_hat) * (0.5 * d_cur + 0.5 * d_prime)
         else:
             # Euler step.
             denoised = net(torch.cat([x_hat, measurements], dim=1), t_hat, class_labels).to(torch.float64)
@@ -309,12 +331,16 @@ def main(network_pkl, dataset, data_dir, outdir, subdirs, max_batch_size, device
     ssim = StructuralSimilarityIndexMeasure()
     avg_ssim = AverageMeter()
 
-    for i, (images, _) in tqdm(enumerate(dataloader)):
+    for i, (images, labels) in tqdm(enumerate(dataloader)):
 
         images = images.cuda()
+        labels = labels.cuda()
 
         threshold = 0.4 * torch.rand((1,)).to(device) + 0.1  #Between 10-50% pixels dropped
         mask = (torch.rand_like(images[:, [0], ...]) > threshold)
+        # mask = torch.zeros_like(images[:, [0], ...])
+        # mask[:, :, :, :16] = 1
+        # mask = mask.bool()
         measurements = images * mask
         projection_to_measurements = lambda x, y: torch.logical_not(mask) * x + y
 
@@ -330,15 +356,15 @@ def main(network_pkl, dataset, data_dir, outdir, subdirs, max_batch_size, device
         latents = torch.cat([latents, measurements], dim=1)
         class_labels = None
         if (hasattr(net, "label_dim") and net.label_dim):
-            class_labels = torch.eye(net.label_dim, device=device)[rnd.randint(net.label_dim, size=[batch_size], device=device)]
+            class_labels = torch.eye(net.label_dim, device=device)[labels]
         elif (hasattr(net.backbone, "label_dim") and net.backbone.label_dim):
-            class_labels = torch.eye(net.backbone.label_dim, device=device)[rnd.randint(net.backbone.label_dim, size=[batch_size], device=device)]
+            class_labels = torch.eye(net.backbone.label_dim, device=device)[labels]
 
         # Generate images.
         sampler_kwargs = {key: value for key, value in sampler_kwargs.items() if value is not None}
         have_ablation_kwargs = any(x in sampler_kwargs for x in ['solver', 'discretization', 'schedule', 'scaling'])
         sampler_fn = ablation_sampler if have_ablation_kwargs else edm_sampler
-        recon_images = sampler_fn(net, latents, projection_to_measurements, class_labels, randn_like=rnd.randn_like, **sampler_kwargs)
+        recon_images = sampler_fn(net, latents, projection_to_measurements, mask, class_labels, randn_like=rnd.randn_like, **sampler_kwargs)
 
         with torch.no_grad():
             loss = mae_loss(images, recon_images)

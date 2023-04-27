@@ -18,6 +18,9 @@ import PIL.Image
 import dnnlib
 
 from tqdm import tqdm
+
+from torchmetrics import StructuralSimilarityIndexMeasure
+
 from torch.utils.data import DataLoader
 from torch_utils.misc import AverageMeter
 from torchvision.datasets import CIFAR10
@@ -289,8 +292,11 @@ def main(network_pkl, dataset, data_dir, outdir, subdirs, max_batch_size, device
     # Loop over batches.
     print(f'Generating {len(dataset)} images to "{outdir}"...')
 
-    criterion = torch.nn.L1Loss()
-    avg = AverageMeter()
+    mae_loss = torch.nn.L1Loss()
+    avg_mae = AverageMeter()
+
+    ssim = StructuralSimilarityIndexMeasure()
+    avg_ssim = AverageMeter()
 
     for i, (images, _) in tqdm(enumerate(dataloader)):
 
@@ -322,8 +328,11 @@ def main(network_pkl, dataset, data_dir, outdir, subdirs, max_batch_size, device
         recon_images = sampler_fn(net, latents, projection_to_measurements, class_labels, randn_like=rnd.randn_like, **sampler_kwargs)
 
         with torch.no_grad():
-            loss = criterion(images, recon_images)
-            avg.update(loss, n=images.shape[0])
+            loss = mae_loss(images, recon_images)
+            avg_mae.update(loss, n=images.shape[0])
+
+            metric = ssim(((images + 1.0) / 2).to(torch.float64), (recon_images + 1.0) / 2)
+            avg_ssim.update(metric, n=images.shape[0])
 
         # Save images.
         images_np = (images * 127.5 + 128).clip(0, 255).to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
@@ -338,7 +347,8 @@ def main(network_pkl, dataset, data_dir, outdir, subdirs, max_batch_size, device
 
     # Done.
     print('Done.')
-    print(f'Average MAE: {avg.get():.4f}')
+    print(f'Average MAE: {avg_mae.get():.4f}')
+    print(f'Average SSIM: {avg_ssim.get()}')
 
 #----------------------------------------------------------------------------
 

@@ -336,14 +336,18 @@ def main(network_pkl, dataset, data_dir, outdir, subdirs, max_batch_size, device
 
         # Save images.
         images_np = (images * 127.5 + 128).clip(0, 255).to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
-        for seed, image_np in zip(batch_seeds, images_np):
-            image_dir = os.path.join(outdir, f'{seed-seed%1000:06d}') if subdirs else outdir
+        recon_images_np = (recon_images * 127.5 + 128).clip(0, 255).to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
+        for recon_image_np, image_np in zip(recon_images_np, images_np):
+            image_dir = outdir
             os.makedirs(image_dir, exist_ok=True)
-            image_path = os.path.join(image_dir, f'{i:06d}.png')
+            image_path = os.path.join(image_dir, f'{i:06d}a.png')
+            recon_image_path = os.path.join(image_dir, f'{i:06d}b.png')
             if image_np.shape[2] == 1:
                 PIL.Image.fromarray(image_np[:, :, 0], 'L').save(image_path)
+                PIL.Image.fromarray(recon_image_np[:, :, 0], 'L').save(recon_image_path)
             else:
                 PIL.Image.fromarray(image_np, 'RGB').save(image_path)
+                PIL.Image.fromarray(recon_image_np, 'RGB').save(recon_image_path)
 
     # Done.
     print('Done.')

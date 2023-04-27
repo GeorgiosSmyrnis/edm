@@ -17,27 +17,31 @@ import numpy as np
 import torch
 import PIL.Image
 import dnnlib
-from torch_utils import distributed as dist
+# from torch_utils import distributed as dist
 
 from torch.utils.data import DataLoader
 from torch_utils.misc import AverageMeter
 from torchvision.datasets import CIFAR10
 from torchvision.transforms import Compose, Normalize, ToTensor
+from torchmetrics import StructuralSimilarityIndexMeasure
 
 #----------------------------------------------------------------------------
 # Proposed EDM sampler (Algorithm 2).
 
 def edm_sampler(
-    net, latents, class_labels=None, randn_like=torch.randn_like,
-    num_steps=18, sigma_min=0.002, sigma_max=80, rho=7,
-    S_churn=0, S_min=0, S_max=float('inf'), S_noise=1,
+    net, inputs, projection_to_measurements, class_labels=None,
+    randn_like=torch.randn_like, num_steps=18, 
+    sigma_min=0.002, sigma_max=80, rho=7,
+    S_churn=0, S_min=0, S_max=float('inf'), S_noise=1, self_cond=False
 ):
+    latents = latents_with_measurements[:, :3, ...]
+    measurements = latents_with_measurements[:, 3:, ...].to(torch.float64)
     # Adjust noise levels based on what's supported by the network.
     sigma_min = max(sigma_min, net.sigma_min)
     sigma_max = min(sigma_max, net.sigma_max)
 
     # Time step discretization.
-    step_indices = torch.arange(num_steps, dtype=torch.float64, device=latents.device)
+    step_indices = torch.arange(num_steps, dtype=torch.float64, device=inputs.device)
     t_steps = (sigma_max ** (1 / rho) + step_indices / (num_steps - 1) * (sigma_min ** (1 / rho) - sigma_max ** (1 / rho))) ** rho
     t_steps = torch.cat([net.round_sigma(t_steps), torch.zeros_like(t_steps[:1])]) # t_N = 0
 
@@ -51,14 +55,20 @@ def edm_sampler(
         t_hat = net.round_sigma(t_cur + gamma * t_cur)
         x_hat = x_cur + (t_hat ** 2 - t_cur ** 2).sqrt() * S_noise * randn_like(x_cur)
 
-        # Euler step.
-        denoised = net(x_hat, t_hat, class_labels).to(torch.float64)
-        d_cur = (x_hat - denoised) / t_hat
-        x_next = x_hat + (t_next - t_hat) * d_cur
+        if self_cond:
+            projected_measurements = projection_to_measurements(x_hat, measurements)
+            denoised = net(torch.cat([x_hat, projected_measurements], dim=1), t_hat, class_labels).to(torch.float64)[:, :3, ...]
+            d_cur = (x_hat - denoised) / t_hat
+            x_next = x_hat + (t_next - t_hat) * d_cur
+        else:
+            # Euler step.
+            denoised = net(torch.cat([x_hat, measurements], axis=1), t_hat, class_labels).to(torch.float64)
+            d_cur = (x_hat - denoised) / t_hat
+            x_next = x_hat + (t_next - t_hat) * d_cur
 
         # Apply 2nd order correction.
         if i < num_steps - 1:
-            denoised = net(x_next, t_next, class_labels).to(torch.float64)
+            denoised = net(torch.cat([x_next, measurements], axis=1), t_next, class_labels).to(torch.float64)
             d_prime = (x_next - denoised) / t_next
             x_next = x_hat + (t_next - t_hat) * (0.5 * d_cur + 0.5 * d_prime)
 
@@ -236,7 +246,9 @@ def parse_int_list(s):
 @click.option('--dataset',                 help='Dataset to perform denoising.',                                    type=str, default='cifar10')
 @click.option('--data_dir',                help='Dataset directory.',                                               type=str, required=True)
 
-def main(network_pkl, data_dir, outdir, max_batch_size, device=torch.device('cuda'), **sampler_kwargs):
+@click.option('--self_cond', help='Self conditioning', is_flag=True)
+
+def main(network_pkl, dataset, data_dir, outdir, subdirs, max_batch_size, device=torch.device('cuda'), subdirs=True, **sampler_kwargs):
     """Generate random images using the techniques described in the paper
     "Elucidating the Design Space of Diffusion-Based Generative Models".
 
@@ -252,55 +264,62 @@ def main(network_pkl, data_dir, outdir, max_batch_size, device=torch.device('cud
     torchrun --standalone --nproc_per_node=2 generate.py --outdir=out --seeds=0-999 --batch=64 \\
         --network=https://nvlabs-fi-cdn.nvidia.com/edm/pretrained/edm-cifar10-32x32-cond-vp.pkl
     """
-    dist.init()
+    # dist.init()
 
-    assert dist.get_world_size() == 1  # Force evaluation on 1 GPU to avoid sync issues.
+    # assert dist.get_world_size() == 1  # Force evaluation on 1 GPU to avoid sync issues.
 
     opts = dnnlib.EasyDict(sampler_kwargs)
 
-    if opts.dataset == 'cifar10':
+    if dataset == 'cifar10':
         normalize = Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
         transform = Compose([
             ToTensor(),
             normalize
         ])
         dataset = CIFAR10(data_dir, train=False, download=True, transform=transform)
-        dataloader = DataLoader(dataset, max_batch_size, shuffle=False, num_workers=96)
+        dataloader = DataLoader(dataset, max_batch_size, shuffle=False, num_workers=96, drop_last=False)
     else:
         raise ValueError("Dataset not supported.")
 
-    num_batches = ((len(dataset) - 1) // (max_batch_size * dist.get_world_size()) + 1) * dist.get_world_size()
-    all_batches = torch.as_tensor(dataset).tensor_split(num_batches)
-    rank_batches = all_batches[dist.get_rank() :: dist.get_world_size()]
+    num_batches = ((len(dataset) - 1) // (max_batch_size * 1) + 1) * 1
+    all_batches = torch.range(0, len(dataset)).tensor_split(num_batches)
+    rank_batches = all_batches #[dist.get_rank() :: 1]
 
     # Rank 0 goes first.
-    if dist.get_rank() != 0:
-        torch.distributed.barrier()
+    # if dist.get_rank() != 0:
+    #     torch.distributed.barrier()
 
     # Load network.
-    dist.print0(f'Loading network from "{network_pkl}"...')
-    with dnnlib.util.open_url(network_pkl, verbose=(dist.get_rank() == 0)) as f:
+    # dist.print0(f'Loading network from "{network_pkl}"...')
+    with dnnlib.util.open_url(network_pkl, verbose=True) as f:
         net = pickle.load(f)['ema'].to(device)
+    
+    print("net ", net)
 
     # Other ranks follow.
-    if dist.get_rank() == 0:
-        torch.distributed.barrier()
+    # if dist.get_rank() == 0:
+    #     torch.distributed.barrier()
 
     # Loop over batches.
-    dist.print0(f'Generating {len(dataset)} images to "{outdir}"...')
+    # dist.print0(f'Generating {len(dataset)} images to "{outdir}"...')
 
     criterion = torch.nn.L1Loss()
-    avg = AverageMeter()
 
-    for i, (images, _) in enumerate(dataloader):
+    mae_loss = torch.nn.L1Loss()
+    avg_mae = AverageMeter()
 
+    ssim = StructuralSimilarityIndexMeasure()
+    avg_ssim = AverageMeter()
+
+    for i, (images, _) in tqdm(enumerate(dataloader)):
         images = images.cuda()
 
-        threshold = 0.4 * torch.rand().to(device) + 0.1  #Between 10-50% pixels dropped
+        threshold = 0.4 * torch.rand(1).to(device) + 0.1  #Between 10-50% pixels dropped
         mask = (torch.rand_like(images[:, [0], ...]) > threshold)
         measurements = images * mask
+        projection_to_measurements = lambda x, y: torch.logical_not(mask) * x + y
 
-        batch_seeds = rank_batches[i]
+        batch_seeds = torch.randint(0, 100000, (images.shape[0],)) #rank_batches[i]
 
         batch_size = len(batch_seeds)
         if batch_size == 0:
@@ -309,38 +328,44 @@ def main(network_pkl, data_dir, outdir, max_batch_size, device=torch.device('cud
         # Pick latents and labels.
         rnd = StackedRandomGenerator(device, batch_seeds)
         latents = rnd.randn([batch_size, net.img_channels, net.img_resolution, net.img_resolution], device=device)
-        latents = torch.cat([latents, measurements], dim=1)
+        # latents = torch.cat([latents, measurements], dim=1)
         class_labels = None
         if net.label_dim:
             class_labels = torch.eye(net.label_dim, device=device)[rnd.randint(net.label_dim, size=[batch_size], device=device)]
-        # if class_idx is not None:
-        #     class_labels[:, :] = 0
-        #     class_labels[:, class_idx] = 1
 
         # Generate images.
         sampler_kwargs = {key: value for key, value in sampler_kwargs.items() if value is not None}
         have_ablation_kwargs = any(x in sampler_kwargs for x in ['solver', 'discretization', 'schedule', 'scaling'])
         sampler_fn = ablation_sampler if have_ablation_kwargs else edm_sampler
-        recon_images = sampler_fn(net, latents, class_labels, randn_like=rnd.randn_like, **sampler_kwargs)
-
+        recon_images = sampler_fn(net, latents, projection_to_measurements, class_labels, randn_like=rnd.randn_like, **sampler_kwargs)
         with torch.no_grad():
             loss = criterion(images, recon_images)
             avg.update(loss, n=images.shape[0])
 
+            metric = ssim(((images + 1.0) / 2).to(torch.float64), (recon_images + 1.0) / 2)
+            avg_ssim.update(metric, n=images.shape[0])
+            
         # Save images.
         images_np = (images * 127.5 + 128).clip(0, 255).to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
-        for seed, image_np in zip(batch_seeds, images_np):
-            image_dir = os.path.join(outdir, f'{seed-seed%1000:06d}') if subdirs else outdir
+        recon_images_np = (recon_images * 127.5 + 128).clip(0, 255).to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
+        for recon_image_np, image_np in zip(recon_images_np, images_np):
+            image_dir = outdir
             os.makedirs(image_dir, exist_ok=True)
-            image_path = os.path.join(image_dir, f'{seed:06d}.png')
+            image_path = os.path.join(image_dir, f'{i:06d}.png')
+            recon_image_path = os.path.join(image_dir, f'{i:06d}b.png')
+
             if image_np.shape[2] == 1:
                 PIL.Image.fromarray(image_np[:, :, 0], 'L').save(image_path)
+                PIL.Image.fromarray(recon_image_np[:, :, 0], 'L').save(recon_image_path)
             else:
                 PIL.Image.fromarray(image_np, 'RGB').save(image_path)
-
+                PIL.Image.fromarray(recon_image_np, 'RGB').save(recon_image_path)
+        
+        print(f'Average MAE: {avg_mae.get():.4f}')
+        print(f'Average SSIM: {avg_ssim.get()}')
+        
     # Done.
-    dist.print0('Done.')
-    dist.print0(f'Average MAE: {avg.get():.4f}')
+    print('Done.')
 
 #----------------------------------------------------------------------------
 

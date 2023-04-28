@@ -34,7 +34,7 @@ def edm_sampler(
     net, inputs, projection_to_measurements, mask, class_labels=None,
     randn_like=torch.randn_like, num_steps=18, sigma_min=0.002, sigma_max=80, rho=7,
     S_churn=0, S_min=0, S_max=float('inf'), S_noise=1, self_cond=False,
-    dps=False, likelihood_step_size=1.0
+    dps=False, likelihood_step_size=1.0, meas_cond=False
 ):
     # Adjust noise levels based on what's supported by the network.
     if hasattr(net, "backbone"):
@@ -117,7 +117,11 @@ def edm_sampler(
                 x_hat = x_hat.requires_grad() #starting grad tracking with the noised img
 
             # Euler step.
-            denoised = net(torch.cat([x_hat, measurements], dim=1), t_hat, class_labels).to(torch.float64)
+            if meas_cond:
+                net_input = torch.cat([x_hat, measurements], dim=1)
+            else:
+                net_input = x_hat
+            denoised = net(net_input, t_hat, class_labels).to(torch.float64)
             d_cur = (x_hat - denoised) / t_hat
             x_next = x_hat + (t_next - t_hat) * d_cur
             
@@ -313,6 +317,8 @@ def parse_int_list(s):
 
 @click.option('--dps',                     help='Whether to use Diffusion Posterior Sampling (DPS)',                is_flag=True)
 @click.option('--likelihood_step_size',    help='log-likelihood gradient step size for DPS', metavar='FLOAT',       type=click.FloatRange(min=0, min_open=True), default=1.0, show_default=True)
+
+@click.option('--meas_cond',               help='Whether the network takes measurements as conditioning input',     is_flag=True)
 
 def main(network_pkl, dataset, data_dir, outdir, subdirs, max_batch_size, device=torch.device('cuda'), **sampler_kwargs):
     """Generate random images using the techniques described in the paper

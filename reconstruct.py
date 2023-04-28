@@ -411,14 +411,14 @@ def main(network_pkl, dataset, data_dir, outdir, subdirs, max_batch_size, device
             avg_ssim.update(metric, n=images.shape[0])
 
         # Save images.
-        if i==1:
+        if i==0:
             images_np = (images * 127.5 + 128).clip(0, 255).to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
             recon_images_np = (recon_images * 127.5 + 128).clip(0, 255).to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
-            for recon_image_np, image_np in zip(recon_images_np, images_np):
+            for j, (recon_image_np, image_np) in enumerate(zip(recon_images_np, images_np)):
                 image_dir = outdir
                 os.makedirs(image_dir, exist_ok=True)
-                image_path = os.path.join(image_dir, f'{i:06d}a.png')
-                recon_image_path = os.path.join(image_dir, f'{i:06d}b.png')
+                image_path = os.path.join(image_dir, f'{j:06d}a.png')
+                recon_image_path = os.path.join(image_dir, f'{j:06d}b.png')
                 if image_np.shape[2] == 1:
                     PIL.Image.fromarray(image_np[:, :, 0], 'L').save(image_path)
                     PIL.Image.fromarray(recon_image_np[:, :, 0], 'L').save(recon_image_path)

@@ -299,6 +299,7 @@ def parse_int_list(s):
 @click.option('--outdir',                  help='Where to save the output images', metavar='DIR',                   type=str, required=True)
 @click.option('--subdirs',                 help='Create subdirectory for every 1000 seeds',                         is_flag=True)
 @click.option('--batch', 'max_batch_size', help='Maximum batch size', metavar='INT',                                type=click.IntRange(min=1), default=64, show_default=True)
+@click.option('--threshold',               help='Proportion of meas to data dim', metavar='FLOAT',                  type=click.FloatRange(min=0), default=0.0, show_default=True)
 
 @click.option('--steps', 'num_steps',      help='Number of sampling steps', metavar='INT',                          type=click.IntRange(min=1), default=18, show_default=True)
 @click.option('--sigma_min',               help='Lowest noise level  [default: varies]', metavar='FLOAT',           type=click.FloatRange(min=0, min_open=True))
@@ -319,7 +320,7 @@ def parse_int_list(s):
 
 @click.option('--meas_cond',               help='Whether the network takes measurements as conditioning input',     is_flag=True)
 
-def main(network_pkl, dataset, data_dir, outdir, subdirs, max_batch_size, device=torch.device('cuda'), **sampler_kwargs):
+def main(network_pkl, dataset, data_dir, outdir, subdirs, max_batch_size, threshold, device=torch.device('cuda'), **sampler_kwargs):
     """Generate random images using the techniques described in the paper
     "Elucidating the Design Space of Diffusion-Based Generative Models".
 
@@ -343,7 +344,7 @@ def main(network_pkl, dataset, data_dir, outdir, subdirs, max_batch_size, device
             normalize
         ])
         dataset = CIFAR10(data_dir, train=False, download=True, transform=transform)
-        dataloader = DataLoader(dataset, max_batch_size, shuffle=False, num_workers=96, drop_last=False)
+        dataloader = DataLoader(dataset, max_batch_size, shuffle=False, num_workers=8, drop_last=False)
     else:
         raise ValueError("Dataset not supported.")
 
@@ -373,8 +374,11 @@ def main(network_pkl, dataset, data_dir, outdir, subdirs, max_batch_size, device
         images = images.to(device)
         labels = labels.to(device)
 
-        threshold = 0.4 * torch.rand((1,)).to(device) + 0.1  #Between 10-50% pixels dropped
-        mask = (torch.rand_like(images[:, [0], ...]) > threshold)
+        if threshold==0.0:
+            threshold_cur = 0.4 * torch.rand((1,)).to(device) + 0.1  #Between 10-50% pixels dropped
+        else:
+            threshold_cur = threshold
+        mask = (torch.rand_like(images[:, [0], ...]) > threshold_cur)
         # mask = torch.zeros_like(images[:, [0], ...])
         # mask[:, :, :, :16] = 1
         # mask = mask.bool()
@@ -425,11 +429,21 @@ def main(network_pkl, dataset, data_dir, outdir, subdirs, max_batch_size, device
                 else:
                     PIL.Image.fromarray(image_np, 'RGB').save(image_path)
                     PIL.Image.fromarray(recon_image_np, 'RGB').save(recon_image_path)
+            
+            print(f'Average MAE: {avg_mae.get():.4f}')
+            print(f'Average SSIM: {avg_ssim.get()}')
+
+            with open(os.path.join(outdir, "batch1_stats.txt"), 'a') as f:
+                f.write(f'Average MAE: {avg_mae.get():.4f}\n')
+                f.write(f'Average SSIM: {avg_ssim.get()}')
 
     # Done.
     print('Done.')
     print(f'Average MAE: {avg_mae.get():.4f}')
     print(f'Average SSIM: {avg_ssim.get()}')
+    with open(os.path.join(outdir, "stats.txt"), 'a') as f:
+        f.write(f'Average MAE: {avg_mae.get():.4f}\n')
+        f.write(f'Average SSIM: {avg_ssim.get()}')
 
 #----------------------------------------------------------------------------
 

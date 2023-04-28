@@ -76,7 +76,7 @@ def edm_sampler(
                 denoised_one_step = net(torch.cat([x_hat, torch.zeros_like(x_hat)], dim=1), t_hat, class_labels)[:, :3, ...].to(torch.float64)
             projected_measurements = projection_to_measurements(denoised_one_step, measurements)   
             if dps:
-                x_hat = x_hat.requires_grad() #starting grad tracking with the noised img
+                x_hat = x_hat.requires_grad_() #starting grad tracking with the noised img
             denoised = net(torch.cat([x_hat, projected_measurements], dim=1), t_hat, class_labels).to(torch.float64)[:, :3, ...] 
             d_cur = (x_hat - denoised) / t_hat
             x_next = x_hat + (t_next - t_hat) * d_cur
@@ -85,7 +85,7 @@ def edm_sampler(
                 residual = measurements - Ax
                 sse = torch.sum(torch.square(residual))
                 likelihood_score = torch.autograd.grad(outputs=sse, inputs=x_hat)[0]
-                x_next = x_next - (likelihood_step_size / sse) * likelihood_score
+                x_next = x_next - (likelihood_step_size / torch.sqrt(sse)) * likelihood_score
                 x_next = x_next.detach()
             else:
                 y_noisy = measurements + (t_next - t_hat) * d_cur
@@ -114,7 +114,7 @@ def edm_sampler(
             # #     x_next = x_hat + (t_next - t_hat) * (0.5 * d_cur + 0.5 * d_prime)
         else:
             if dps:
-                x_hat = x_hat.requires_grad() #starting grad tracking with the noised img
+                x_hat = x_hat.requires_grad_() #starting grad tracking with the noised img
 
             # Euler step.
             if meas_cond:
@@ -130,11 +130,10 @@ def edm_sampler(
                 residual = measurements - Ax
                 sse = torch.sum(torch.square(residual))
                 likelihood_score = torch.autograd.grad(outputs=sse, inputs=x_hat)[0]
-                x_next = x_next - (likelihood_step_size / sse) * likelihood_score
+                x_next = x_next - (likelihood_step_size / torch.sqrt(sse)) * likelihood_score
                 x_next = x_next.detach()
-
             # Apply 2nd order correction.
-            if i < num_steps - 1 and not dps:
+            elif i < num_steps - 1:
                 denoised = net(torch.cat([x_next, measurements], dim=1), t_next, class_labels).to(torch.float64)
                 d_prime = (x_next - denoised) / t_next
                 x_next = x_hat + (t_next - t_hat) * (0.5 * d_cur + 0.5 * d_prime)
@@ -366,13 +365,13 @@ def main(network_pkl, dataset, data_dir, outdir, subdirs, max_batch_size, device
     mae_loss = torch.nn.L1Loss()
     avg_mae = AverageMeter()
 
-    ssim = StructuralSimilarityIndexMeasure()
+    ssim = StructuralSimilarityIndexMeasure().to(device)
     avg_ssim = AverageMeter()
 
     for i, (images, labels) in tqdm(enumerate(dataloader)):
 
-        images = images.cuda()
-        labels = labels.cuda()
+        images = images.to(device)
+        labels = labels.to(device)
 
         threshold = 0.4 * torch.rand((1,)).to(device) + 0.1  #Between 10-50% pixels dropped
         mask = (torch.rand_like(images[:, [0], ...]) > threshold)
@@ -412,19 +411,20 @@ def main(network_pkl, dataset, data_dir, outdir, subdirs, max_batch_size, device
             avg_ssim.update(metric, n=images.shape[0])
 
         # Save images.
-        images_np = (images * 127.5 + 128).clip(0, 255).to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
-        recon_images_np = (recon_images * 127.5 + 128).clip(0, 255).to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
-        for recon_image_np, image_np in zip(recon_images_np, images_np):
-            image_dir = outdir
-            os.makedirs(image_dir, exist_ok=True)
-            image_path = os.path.join(image_dir, f'{i:06d}a.png')
-            recon_image_path = os.path.join(image_dir, f'{i:06d}b.png')
-            if image_np.shape[2] == 1:
-                PIL.Image.fromarray(image_np[:, :, 0], 'L').save(image_path)
-                PIL.Image.fromarray(recon_image_np[:, :, 0], 'L').save(recon_image_path)
-            else:
-                PIL.Image.fromarray(image_np, 'RGB').save(image_path)
-                PIL.Image.fromarray(recon_image_np, 'RGB').save(recon_image_path)
+        if i==1:
+            images_np = (images * 127.5 + 128).clip(0, 255).to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
+            recon_images_np = (recon_images * 127.5 + 128).clip(0, 255).to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
+            for recon_image_np, image_np in zip(recon_images_np, images_np):
+                image_dir = outdir
+                os.makedirs(image_dir, exist_ok=True)
+                image_path = os.path.join(image_dir, f'{i:06d}a.png')
+                recon_image_path = os.path.join(image_dir, f'{i:06d}b.png')
+                if image_np.shape[2] == 1:
+                    PIL.Image.fromarray(image_np[:, :, 0], 'L').save(image_path)
+                    PIL.Image.fromarray(recon_image_np[:, :, 0], 'L').save(recon_image_path)
+                else:
+                    PIL.Image.fromarray(image_np, 'RGB').save(image_path)
+                    PIL.Image.fromarray(recon_image_np, 'RGB').save(recon_image_path)
 
     # Done.
     print('Done.')

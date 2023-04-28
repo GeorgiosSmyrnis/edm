@@ -26,6 +26,8 @@ from torch_utils.misc import AverageMeter
 from torchvision.datasets import CIFAR10
 from torchvision.transforms import Compose, Normalize, ToTensor
 
+import torchvision.transforms.functional as F
+
 #----------------------------------------------------------------------------
 # Proposed EDM sampler (Algorithm 2).
 
@@ -81,9 +83,6 @@ def edm_sampler(
             # if i < num_steps - 1:
             #     denoised = projection_to_measurements(denoised, measurements)
             # denoised = torch.clamp(denoised, -1.0, 1.0)
-
-
-
 
             # with torch.no_grad():
             #     denoised_one_step = net(torch.cat([x_hat, torch.zeros_like(x_hat)], dim=1), t_hat, class_labels)[:, :3, ...].to(torch.float64)
@@ -288,7 +287,9 @@ def parse_int_list(s):
 
 @click.option('--self_cond',               help='Self conditioning',                                                is_flag=True)
 
-def main(network_pkl, dataset, data_dir, outdir, subdirs, max_batch_size, device=torch.device('cuda'), **sampler_kwargs):
+@click.option('--noise_type',              help='noise type',                                                       type=str)
+
+def main(network_pkl, dataset, data_dir, outdir, subdirs, max_batch_size, noise_type=None, device=torch.device('cuda'), **sampler_kwargs):
     """Generate random images using the techniques described in the paper
     "Elucidating the Design Space of Diffusion-Based Generative Models".
 
@@ -325,73 +326,106 @@ def main(network_pkl, dataset, data_dir, outdir, subdirs, max_batch_size, device
     # Loop over batches.
     print(f'Generating {len(dataset)} images to "{outdir}"...')
 
+    results_mae = []
+    results_ssim = []
+
+    if sampler_kwargs["self_cond"]:
+        if noise_type == "inpainting":
+            noise_levels = [0.1, 0.2, 0.3, 0.4, 0.5]
+        elif noise_type == "downsampling":
+            noise_levels = [2, 4]
+    else:
+        noise_levels = [None]
+
     mae_loss = torch.nn.L1Loss()
     avg_mae = AverageMeter()
 
     ssim = StructuralSimilarityIndexMeasure()
     avg_ssim = AverageMeter()
 
-    for i, (images, labels) in tqdm(enumerate(dataloader)):
+    for noise in noise_levels:
 
-        images = images.cuda()
-        labels = labels.cuda()
+        for i, (images, labels) in tqdm(enumerate(dataloader)):
 
-        threshold = 0.4 * torch.rand((1,)).to(device) + 0.1  #Between 10-50% pixels dropped
-        mask = (torch.rand_like(images[:, [0], ...]) > threshold)
-        # mask = torch.zeros_like(images[:, [0], ...])
-        # mask[:, :, :, :16] = 1
-        # mask = mask.bool()
-        measurements = images * mask
-        projection_to_measurements = lambda x, y: torch.logical_not(mask) * x + y
+            images = images.cuda()
+            labels = labels.cuda()
 
-        batch_seeds = torch.randint(0, 100000, (images.shape[0],))
+            if noise is None:
+                threshold = 0.4 * torch.rand((1,)).to(device) + 0.1  #Between 10-50% pixels dropped
+                mask = (torch.rand_like(images[:, [0], ...]) > threshold)
+                measurements = images * mask
+                projection_to_measurements = lambda x, y: torch.logical_not(mask) * x + y
+            elif noise_type == "inpainting":
+                threshold = noise
+                mask = (torch.rand_like(images[:, [0], ...]) > threshold)
+                measurements = images * mask
+                projection_to_measurements = lambda x, y: torch.logical_not(mask) * x + y
+            elif noise_type == "downsampling":
+                mask = torch.zeros(images.shape[-1], device=images.device)
+                mask[torch.arange(0, images.shape[-1], step=noise, dtype=torch.int64)] = 1
+                mask = mask.unsqueeze(0)
+                mask = torch.cat([mask] + [torch.zeros_like(mask)] * (noise - 1), dim=0)
+                mask = torch.tile(mask, (images.shape[-2] // noise, 1))
+                mask = mask.unsqueeze(0)
+                mask = mask.unsqueeze(0)
+                mask = torch.tile(mask, (images.shape[0], images.shape[1], 1, 1))
+                mask = mask.bool()
+                measurements = images[mask].reshape(images.shape[0], images.shape[1], images.shape[2] // noise, images.shape[3] // noise)
+                measurements = F.resize(measurements, [images.shape[-2], images.shape[-1]])
+                projection_to_measurements = lambda x, y: torch.logical_not(mask) * x + mask * y
 
-        batch_size = len(batch_seeds)
-        if batch_size == 0:
-            continue
+            batch_seeds = torch.randint(0, 100000, (images.shape[0],))
 
-        # Pick latents and labels.
-        rnd = StackedRandomGenerator(device, batch_seeds)
-        latents = rnd.randn_like(images)
-        latents = torch.cat([latents, measurements], dim=1)
-        class_labels = None
-        if (hasattr(net, "label_dim") and net.label_dim):
-            class_labels = torch.eye(net.label_dim, device=device)[labels]
-        elif (hasattr(net.backbone, "label_dim") and net.backbone.label_dim):
-            class_labels = torch.eye(net.backbone.label_dim, device=device)[labels]
+            batch_size = len(batch_seeds)
+            if batch_size == 0:
+                continue
 
-        # Generate images.
-        sampler_kwargs = {key: value for key, value in sampler_kwargs.items() if value is not None}
-        have_ablation_kwargs = any(x in sampler_kwargs for x in ['solver', 'discretization', 'schedule', 'scaling'])
-        sampler_fn = ablation_sampler if have_ablation_kwargs else edm_sampler
-        recon_images = sampler_fn(net, latents, projection_to_measurements, mask, class_labels, randn_like=rnd.randn_like, **sampler_kwargs)
+            # Pick latents and labels.
+            rnd = StackedRandomGenerator(device, batch_seeds)
+            latents = rnd.randn_like(images)
+            latents = torch.cat([latents, measurements], dim=1)
+            class_labels = None
+            if (hasattr(net, "label_dim") and net.label_dim):
+                class_labels = torch.eye(net.label_dim, device=device)[labels]
+            elif (hasattr(net.backbone, "label_dim") and net.backbone.label_dim):
+                class_labels = torch.eye(net.backbone.label_dim, device=device)[labels]
 
-        with torch.no_grad():
-            loss = mae_loss(images, recon_images)
-            avg_mae.update(loss, n=images.shape[0])
+            # Generate images.
+            sampler_kwargs = {key: value for key, value in sampler_kwargs.items() if value is not None}
+            have_ablation_kwargs = any(x in sampler_kwargs for x in ['solver', 'discretization', 'schedule', 'scaling'])
+            sampler_fn = ablation_sampler if have_ablation_kwargs else edm_sampler
+            recon_images = sampler_fn(net, latents, projection_to_measurements, mask, class_labels, randn_like=rnd.randn_like, **sampler_kwargs)
 
-            metric = ssim(((images + 1.0) / 2).to(torch.float64), (recon_images + 1.0) / 2)
-            avg_ssim.update(metric, n=images.shape[0])
+            with torch.no_grad():
+                loss = mae_loss(images, recon_images)
+                avg_mae.update(loss, n=images.shape[0])
 
-        # Save images.
-        images_np = (images * 127.5 + 128).clip(0, 255).to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
-        recon_images_np = (recon_images * 127.5 + 128).clip(0, 255).to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
-        for recon_image_np, image_np in zip(recon_images_np, images_np):
-            image_dir = outdir
-            os.makedirs(image_dir, exist_ok=True)
-            image_path = os.path.join(image_dir, f'{i:06d}a.png')
-            recon_image_path = os.path.join(image_dir, f'{i:06d}b.png')
-            if image_np.shape[2] == 1:
-                PIL.Image.fromarray(image_np[:, :, 0], 'L').save(image_path)
-                PIL.Image.fromarray(recon_image_np[:, :, 0], 'L').save(recon_image_path)
-            else:
-                PIL.Image.fromarray(image_np, 'RGB').save(image_path)
-                PIL.Image.fromarray(recon_image_np, 'RGB').save(recon_image_path)
+                metric = ssim(((images + 1.0) / 2).to(torch.float64), (recon_images + 1.0) / 2)
+                avg_ssim.update(metric, n=images.shape[0])
 
-    # Done.
-    print('Done.')
-    print(f'Average MAE: {avg_mae.get():.4f}')
-    print(f'Average SSIM: {avg_ssim.get()}')
+            # Save images.
+            images_np = (images * 127.5 + 128).clip(0, 255).to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
+            recon_images_np = (recon_images * 127.5 + 128).clip(0, 255).to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
+            for recon_image_np, image_np in zip(recon_images_np, images_np):
+                image_dir = outdir
+                os.makedirs(image_dir, exist_ok=True)
+                image_path = os.path.join(image_dir, f'{i:06d}a.png')
+                recon_image_path = os.path.join(image_dir, f'{i:06d}b.png')
+                if image_np.shape[2] == 1:
+                    PIL.Image.fromarray(image_np[:, :, 0], 'L').save(image_path)
+                    PIL.Image.fromarray(recon_image_np[:, :, 0], 'L').save(recon_image_path)
+                else:
+                    PIL.Image.fromarray(image_np, 'RGB').save(image_path)
+                    PIL.Image.fromarray(recon_image_np, 'RGB').save(recon_image_path)
+
+        # Done.
+        print(f'Done with noise level {noise}')
+        results_mae.append(avg_mae.get())
+        results_ssim.append(avg_ssim.get())
+
+    print('Done')
+    print(results_mae)
+    print(results_ssim)
 
 #----------------------------------------------------------------------------
 

@@ -33,7 +33,8 @@ from torchvision.transforms import Compose, Normalize, ToTensor
 def edm_sampler(
     net, inputs, projection_to_measurements, mask, class_labels=None,
     randn_like=torch.randn_like, num_steps=18, sigma_min=0.002, sigma_max=80, rho=7,
-    S_churn=0, S_min=0, S_max=float('inf'), S_noise=1, self_cond=False
+    S_churn=0, S_min=0, S_max=float('inf'), S_noise=1, self_cond=False,
+    dps=False, likelihood_step_size=1.0
 ):
     # Adjust noise levels based on what's supported by the network.
     if hasattr(net, "backbone"):
@@ -74,11 +75,21 @@ def edm_sampler(
             with torch.no_grad():
                 denoised_one_step = net(torch.cat([x_hat, torch.zeros_like(x_hat)], dim=1), t_hat, class_labels)[:, :3, ...].to(torch.float64)
             projected_measurements = projection_to_measurements(denoised_one_step, measurements)   
+            if dps:
+                x_hat = x_hat.requires_grad() #starting grad tracking with the noised img
             denoised = net(torch.cat([x_hat, projected_measurements], dim=1), t_hat, class_labels).to(torch.float64)[:, :3, ...] 
             d_cur = (x_hat - denoised) / t_hat
             x_next = x_hat + (t_next - t_hat) * d_cur
-            y_noisy = measurements + (t_next - t_hat) * d_cur
-            x_next = torch.logical_not(mask) * x_next + mask * y_noisy        
+            if dps:
+                Ax = mask * denoised
+                residual = measurements - Ax
+                sse = torch.sum(torch.square(residual))
+                likelihood_score = torch.autograd.grad(outputs=sse, inputs=x_hat)[0]
+                x_next = x_next - (likelihood_step_size / sse) * likelihood_score
+                x_next = x_next.detach()
+            else:
+                y_noisy = measurements + (t_next - t_hat) * d_cur
+                x_next = torch.logical_not(mask) * x_next + mask * y_noisy        
             # if i < num_steps - 1:
             #     denoised = projection_to_measurements(denoised, measurements)
             # denoised = torch.clamp(denoised, -1.0, 1.0)
@@ -102,13 +113,24 @@ def edm_sampler(
             # #     d_prime = (x_next - denoised) / t_next
             # #     x_next = x_hat + (t_next - t_hat) * (0.5 * d_cur + 0.5 * d_prime)
         else:
+            if dps:
+                x_hat = x_hat.requires_grad() #starting grad tracking with the noised img
+
             # Euler step.
             denoised = net(torch.cat([x_hat, measurements], dim=1), t_hat, class_labels).to(torch.float64)
             d_cur = (x_hat - denoised) / t_hat
             x_next = x_hat + (t_next - t_hat) * d_cur
+            
+            if dps:
+                Ax = mask * denoised
+                residual = measurements - Ax
+                sse = torch.sum(torch.square(residual))
+                likelihood_score = torch.autograd.grad(outputs=sse, inputs=x_hat)[0]
+                x_next = x_next - (likelihood_step_size / sse) * likelihood_score
+                x_next = x_next.detach()
 
             # Apply 2nd order correction.
-            if i < num_steps - 1:
+            if i < num_steps - 1 and not dps:
                 denoised = net(torch.cat([x_next, measurements], dim=1), t_next, class_labels).to(torch.float64)
                 d_prime = (x_next - denoised) / t_next
                 x_next = x_hat + (t_next - t_hat) * (0.5 * d_cur + 0.5 * d_prime)
@@ -288,6 +310,9 @@ def parse_int_list(s):
 @click.option('--data_dir',                help='Dataset directory.',                                               type=str, required=True)
 
 @click.option('--self_cond',               help='Self conditioning',                                                is_flag=True)
+
+@click.option('--dps',                     help='Whether to use Diffusion Posterior Sampling (DPS)',                is_flag=True)
+@click.option('--likelihood_step_size',    help='log-likelihood gradient step size for DPS', metavar='FLOAT',       type=click.FloatRange(min=0, min_open=True), default=1.0, show_default=True)
 
 def main(network_pkl, dataset, data_dir, outdir, subdirs, max_batch_size, device=torch.device('cuda'), **sampler_kwargs):
     """Generate random images using the techniques described in the paper

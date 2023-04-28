@@ -16,6 +16,7 @@ import numpy as np
 import torch
 import PIL.Image
 import dnnlib
+import json
 
 from tqdm import tqdm
 
@@ -321,6 +322,12 @@ def main(network_pkl, dataset, data_dir, outdir, subdirs, max_batch_size, device
     print(f'Loading network from "{network_pkl}"...')
     with dnnlib.util.open_url(network_pkl, verbose=True) as f:
         net = pickle.load(f)['ema'].to(device)
+
+    # Save run options.
+    opts = dnnlib.EasyDict(sampler_kwargs)
+    os.makedirs(outdir, exist_ok=True)
+    with open(os.path.join(outdir, 'options.json'), 'wt') as f:
+        json.dump(opts, f, indent=2)
 
     # Loop over batches.
     print(f'Generating {len(dataset)} images to "{outdir}"...')
